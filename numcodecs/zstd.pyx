@@ -6,6 +6,7 @@
 
 
 from cpython.bytes cimport PyBytes_AS_STRING, PyBytes_FromStringAndSize
+from cpython.bytearray cimport PyByteArray_FromStringAndSize, PyByteArray_Resize, PyByteArray_AsString
 from cpython.memoryview cimport PyMemoryView_GET_BUFFER
 
 from .compat_ext cimport PyBytes_RESIZE, ensure_continguous_memoryview
@@ -284,6 +285,7 @@ cdef stream_decompress(const Py_buffer* source_pb):
         ZSTD_inBuffer input
         ZSTD_outBuffer output
         ZSTD_DStream *zds
+        bytearray dest
 
     # Recommended size for output buffer, guaranteed to flush at least
     # one completely block in all circumstances
@@ -299,7 +301,9 @@ cdef stream_decompress(const Py_buffer* source_pb):
         # minimum dest_size is DEST_GROWTH_SIZE
         dest_size = DEST_GROWTH_SIZE
 
-    dest_ptr = <char *>malloc(dest_size)
+    dest = PyByteArray_FromStringAndSize(NULL, dest_size)
+    dest_ptr = PyByteArray_AsString(dest)
+
     zds = ZSTD_createDStream()
 
     try:
@@ -335,21 +339,22 @@ cdef stream_decompress(const Py_buffer* source_pb):
                     if new_size < output.size or new_size < DEST_GROWTH_SIZE:
                         raise RuntimeError('Zstd stream decompression error: output buffer overflow')
 
-                    new_dst = realloc(output.dst, new_size)
+                    with gil:
+                        status = PyByteArray_Resize(dest, new_size)
 
-                    if new_dst == NULL:
-                        # output.dst freed in finally block
-                        raise RuntimeError('Zstd stream decompression error on realloc: could not expand output buffer')
+                        if status < 0:
+                            raise RuntimeError('Zstd stream decompression error on realloc: could not expand output buffer')
 
-                    output.dst = new_dst
-                    output.size = new_size
+                        output.dst = PyByteArray_AsString(dest)
+                        output.size = new_size
 
-        # Copy the output to a bytes object
-        dest = PyBytes_FromStringAndSize(<char *>output.dst, output.pos)
+        status = PyByteArray_Resize(dest, output.pos)
+
+        if status < 0:
+            raise RuntimeError('Zstd stream decompression error: could not shrink output to size')
 
     finally:
         ZSTD_freeDStream(zds)
-        free(output.dst)
 
     return dest
 
